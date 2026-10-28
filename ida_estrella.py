@@ -1,9 +1,10 @@
 """
-BFS-IDA* con memoria, tabú y control de profundidad (Algoritmos 1 y 2 de tu documento).
+BFS-IDA* con memoria, tabú y control de profundidad.
 
 Estructuras de datos
-  info      : dict estado -> (g, padre, movimiento, h_parcial)   (Open ∪ Closed; sirve de tabú
-              y de memoria de caminos; el h_parcial se cachea para no recalcularlo)
+  info      : dict estado -> (g, padre, movimiento, componentes_empaquetadas)  (Open ∪ Closed;
+              sirve de tabú y de memoria de caminos; las heurísticas se actualizan
+              incrementalmente a partir de las del padre)
   abierta   : heap (f, desempate, estado, g)       nodos con f <= umbral
   reserva   : heap (f, desempate, estado, g)       "NodosExcedidos": f > umbral, se conservan
               para la siguiente iteración (persistencia entre iteraciones IDA*)
@@ -19,7 +20,7 @@ Control de memoria
 
 Uso:
   python ida_estrella.py instances/5x5/facil/001_5_10.txt
-  python ida_estrella.py archivo.txt --tiempo 120 --prof-max 100 --escalar-gmax --detalle
+  python ida_estrella.py archivo.txt --tiempo 120 --prof-max 100 --detalle
 """
 import argparse
 import heapq
@@ -47,8 +48,9 @@ def reconstruir(info, estado):
 
 
 def resolver(n, inicial, meta, prof_max=100, limite_seg=None, max_nodos=2_000_000,
-             gmax=100.0, escalar_gmax=False, pesos=None):
+             gmax=100.0):
     """
+    Resuelve el rompecabezas con BFS-IDA* (funcion de evaluacion: ver heuristica.py).
     Devuelve (camino | None, estatus, stats).
     estatus: RESUELTO | TIMEOUT | SIN_SOLUCION (paridad) | AGOTADO
     """
@@ -65,10 +67,8 @@ def resolver(n, inicial, meta, prof_max=100, limite_seg=None, max_nodos=2_000_00
         return fin([], "RESUELTO")
     if not es_resoluble(n, inicial, meta):
         return fin(None, "SIN_SOLUCION")
-
-    if escalar_gmax:                       # mantiene el balance g/h al crecer n
-        gmax = gmax * (n / 5.0) ** 3
-    fe = FuncionEvaluacion(n, meta, pesos=pesos, gmax=gmax)
+    
+    fe = FuncionEvaluacion(n, meta, gmax=gmax)
     vecinos = tabla_vecinos(n)
 
     camino_global = []
@@ -77,8 +77,9 @@ def resolver(n, inicial, meta, prof_max=100, limite_seg=None, max_nodos=2_000_00
 
     while True:                                           # ---- Algoritmo 1: reinicios
         stats["reinicios"] += 1
-        hp0 = fe.h_parcial(actual)
-        info = {actual: (0, None, None, hp0)}
+        comp0 = fe.completo(actual)
+        hp0 = fe.hp_de(comp0)
+        info = {actual: (0, None, None, comp0)}
         umbral = fe.f(hp0, 0)
         abierta = [(umbral, 0, actual, 0)]
         reserva = []
@@ -112,13 +113,18 @@ def resolver(n, inicial, meta, prof_max=100, limite_seg=None, max_nodos=2_000_00
                     break
 
                 cero = x.index(0)
+                comp_x = info[x][3]
                 gh = gx + 1
                 for nueva, letra in vecinos[cero]:
                     h = mover(x, cero, nueva)
                     ex = info.get(h)
                     if ex is not None and ex[0] <= gh:    # tabú / repetido sin mejora
                         continue
-                    hp = ex[3] if ex is not None else fe.h_parcial(h)
+                    if ex is not None:
+                        comp = ex[3]
+                        hp = fe.hp_de(comp)
+                    else:
+                        hp, comp = fe.hijo(x, comp_x, cero, nueva, h)
                     fh = hp + fe.g_ponderado(gh)
                     stats["generados"] += 1
 
@@ -127,12 +133,12 @@ def resolver(n, inicial, meta, prof_max=100, limite_seg=None, max_nodos=2_000_00
                             mejor_f, mejor_hoja = fh, (h, x, letra)
                         continue
 
-                    info[h] = (gh, x, letra, hp)          # nuevo o camino más corto
+                    info[h] = (gh, x, letra, comp)          # nuevo o camino más corto
                     cerrados.discard(h)
                     if fh > umbral:
-                        heapq.heappush(reserva, (fh, next(desempate), h, gh))
+                        heapq.heappush(reserva, (fh, -next(desempate), h, gh))
                     else:
-                        heapq.heappush(abierta, (fh, next(desempate), h, gh))
+                        heapq.heappush(abierta, (fh, -next(desempate), h, gh))
                 cerrados.add(x)
 
             if reiniciar_en is not None:
@@ -170,17 +176,15 @@ def main():
     ap = argparse.ArgumentParser(description="BFS-IDA* para el rompecabezas n x n")
     ap.add_argument("archivo")
     ap.add_argument("--prof-max", type=int, default=100)
-    ap.add_argument("--tiempo", type=float, default=180.0, help="límite en segundos")
+    ap.add_argument("--tiempo", type=float, default=120.0, help="límite en segundos")
     ap.add_argument("--max-nodos", type=int, default=2_000_000)
     ap.add_argument("--gmax", type=float, default=100.0)
-    ap.add_argument("--escalar-gmax", action="store_true",
-                    help="Gmax = gmax * (n/5)^3 para balancear g contra las h")
     ap.add_argument("--detalle", action="store_true", help="imprime estadísticas a stderr")
     a = ap.parse_args()
 
     n, ini, meta = leer_instancia(a.archivo)
     camino, estatus, st = resolver(n, ini, meta, a.prof_max, a.tiempo, a.max_nodos,
-                                   a.gmax, a.escalar_gmax)
+                                   a.gmax)
     if camino is not None:
         print(",".join(camino))                           # salida a consola
     if a.detalle or camino is None:
